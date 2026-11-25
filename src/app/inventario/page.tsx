@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { useDarkMode } from "@/lib/use-dark-mode";
 
 type Product = {
   id: string;
@@ -101,7 +102,7 @@ function dateOnly(value: string | null) {
 }
 
 export default function InventarioPage() {
-  const [darkMode, setDarkMode] = useState(false);
+  const darkMode = useDarkMode();
   const [businessId, setBusinessId] = useState("");
   const [businessName, setBusinessName] = useState("ELITE GAMMA");
   const [products, setProducts] = useState<Product[]>([]);
@@ -137,16 +138,6 @@ export default function InventarioPage() {
       : "border-[#E5E7EB] bg-white text-[#20232B]"
   }`;
 
-  useEffect(() => {
-    setDarkMode(window.localStorage.getItem("elite-gamma-theme") === "dark");
-    const handleThemeChange = (event: Event) => {
-      const customEvent = event as CustomEvent<{ darkMode: boolean }>;
-      setDarkMode(Boolean(customEvent.detail?.darkMode));
-    };
-    window.addEventListener("elite-gamma-theme-change", handleThemeChange);
-    return () => window.removeEventListener("elite-gamma-theme-change", handleThemeChange);
-  }, []);
-
   const loadCountItems = useCallback(async (id: string, currentBusinessId: string) => {
     const supabase = createClient();
     const { data, error: itemsError } = await supabase
@@ -157,13 +148,10 @@ export default function InventarioPage() {
       .order("created_at", { ascending: true });
 
     if (itemsError) throw new Error(itemsError.message);
-    setCountItems((data ?? []) as CountItem[]);
+    return (data ?? []) as CountItem[];
   }, []);
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
-    setError("");
-
+  const fetchData = useCallback(async () => {
     try {
       const supabase = createClient();
       const { data: business, error: businessError } = await supabase
@@ -174,9 +162,6 @@ export default function InventarioPage() {
 
       if (businessError) throw new Error(businessError.message);
       if (!business) throw new Error("No encontramos un negocio asociado a tu cuenta.");
-
-      setBusinessId(business.id);
-      setBusinessName(business.name);
 
       const [productsResult, brandsResult, stockResult, discrepanciesResult, movementsResult, countsResult, draftResult] = await Promise.all([
         supabase
@@ -229,45 +214,93 @@ export default function InventarioPage() {
       if (countsResult.error) throw new Error(`Historial de conteos: ${countsResult.error.message}`);
       if (draftResult.error) throw new Error(`Conteo abierto: ${draftResult.error.message}`);
 
-      setProducts((productsResult.data ?? []).map((row) => ({
+      const products = (productsResult.data ?? []).map((row) => ({
         ...row,
         minimum_stock: Number(row.minimum_stock ?? 0),
         cost_price: Number(row.cost_price ?? 0),
-      })) as Product[]);
-      setBrands((brandsResult.data ?? []) as Brand[]);
-      setStockRows((stockResult.data ?? []).map((row) => ({
+      })) as Product[];
+      const brands = (brandsResult.data ?? []) as Brand[];
+      const stockRows = (stockResult.data ?? []).map((row) => ({
         ...row,
         stock_quantity: Number(row.stock_quantity ?? 0),
-      })) as StockRow[]);
-      setDiscrepancies((discrepanciesResult.data ?? []).map((row) => ({
+      })) as StockRow[];
+      const discrepancies = (discrepanciesResult.data ?? []).map((row) => ({
         ...row,
         source_stock_initial: Number(row.source_stock_initial),
         physical_stock_confirmed: Number(row.physical_stock_confirmed),
         difference: Number(row.difference),
-      })) as Discrepancy[]);
-      setMovements((movementsResult.data ?? []).map((row) => ({
+      })) as Discrepancy[];
+      const movements = (movementsResult.data ?? []).map((row) => ({
         ...row,
         quantity_delta: Number(row.quantity_delta),
         unit_cost: row.unit_cost === null ? null : Number(row.unit_cost),
-      })) as Movement[]);
-      setCounts((countsResult.data ?? []) as InventoryCount[]);
-      setDraftCount((draftResult.data ?? null) as InventoryCount | null);
+      })) as Movement[];
+      const counts = (countsResult.data ?? []) as InventoryCount[];
+      const draftCount = (draftResult.data ?? null) as InventoryCount | null;
+      const countItems = draftResult.data
+        ? await loadCountItems(draftResult.data.id, business.id)
+        : [];
 
-      if (draftResult.data) {
-        await loadCountItems(draftResult.data.id, business.id);
-      } else {
-        setCountItems([]);
-      }
+      return {
+        businessId: business.id,
+        businessName: business.name,
+        products,
+        brands,
+        stockRows,
+        discrepancies,
+        movements,
+        counts,
+        draftCount,
+        countItems,
+      };
+    } catch (err) {
+      throw new Error(err instanceof Error ? err.message : "No se pudo cargar el inventario.");
+    }
+  }, [loadCountItems]);
+
+  const applyData = useCallback((data: Awaited<ReturnType<typeof fetchData>>) => {
+    setBusinessId(data.businessId);
+    setBusinessName(data.businessName);
+    setProducts(data.products);
+    setBrands(data.brands);
+    setStockRows(data.stockRows);
+    setDiscrepancies(data.discrepancies);
+    setMovements(data.movements);
+    setCounts(data.counts);
+    setDraftCount(data.draftCount);
+    setCountItems(data.countItems);
+  }, []);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      applyData(await fetchData());
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo cargar el inventario.");
     } finally {
       setLoading(false);
     }
-  }, [loadCountItems]);
+  }, [applyData, fetchData]);
 
   useEffect(() => {
-    void loadData();
-  }, [loadData]);
+    let active = true;
+    void fetchData()
+      .then((data) => {
+        if (active) applyData(data);
+      })
+      .catch((err) => {
+        if (active) setError(err instanceof Error ? err.message : "No se pudo cargar el inventario.");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [applyData, fetchData]);
+
+  const refreshData = loadData;
 
   const stockMap = useMemo(
     () => new Map(stockRows.map((row) => [row.product_id, row.stock_quantity])),
@@ -324,13 +357,14 @@ export default function InventarioPage() {
     setSuccess("");
     try {
       const supabase = createClient();
+      const notes = countNotes.trim();
       const { data, error: rpcError } = await supabase.rpc("start_inventory_count", {
         p_business_id: businessId,
-        p_notes: countNotes.trim() || null,
+        ...(notes ? { p_notes: notes } : {}),
       });
       if (rpcError) throw new Error(rpcError.message);
       const countId = data as string;
-      await loadData();
+      await refreshData();
       setCountNotes("");
       setActiveTab("stock");
       setSuccess(`Conteo iniciado correctamente. Referencia: ${countId.slice(0, 8)}.`);
@@ -364,7 +398,7 @@ export default function InventarioPage() {
           p_count_id: draftCount.id,
           p_product_id: item.product_id,
           p_counted_quantity: item.counted_quantity,
-          p_notes: item.notes,
+          ...(item.notes ? { p_notes: item.notes } : {}),
         }
       );
 
@@ -387,7 +421,7 @@ export default function InventarioPage() {
       const saved = await saveCountItems();
       if (!saved) return;
       setSuccess("Conteo guardado como borrador. Todavía no se modificó el stock.");
-      await loadData();
+      await refreshData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo guardar el conteo.");
     } finally {
@@ -415,7 +449,7 @@ export default function InventarioPage() {
       setConfirmationText("");
       setSuccess("Conteo completado. Las diferencias se registraron en el historial de movimientos.");
       setActiveTab("movements");
-      await loadData();
+      await refreshData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo completar el conteo.");
     } finally {
@@ -441,7 +475,7 @@ export default function InventarioPage() {
       });
       if (rpcError) throw new Error(rpcError.message);
       setSuccess("Conteo cancelado. El historial se conservó sin modificar el stock.");
-      await loadData();
+      await refreshData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo cancelar el conteo.");
     } finally {
@@ -462,7 +496,7 @@ export default function InventarioPage() {
           </div>
           <button
             type="button"
-            onClick={() => void loadData()}
+            onClick={() => void refreshData()}
             disabled={loading || saving}
             className={`rounded-lg border px-4 py-2.5 text-sm font-semibold ${surface} disabled:opacity-50`}
           >

@@ -8,6 +8,7 @@ import {
   type FormEvent,
 } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { useDarkMode } from "@/lib/use-dark-mode";
 
 type Brand = { id: string; name: string };
 type Category = { id: string; name: string };
@@ -74,7 +75,7 @@ function priceValue(product: Product, key: string): number | null {
 }
 
 export default function ProductosPage() {
-  const [darkMode, setDarkMode] = useState(false);
+  const darkMode = useDarkMode();
   const [businessId, setBusinessId] = useState("");
   const [products, setProducts] = useState<Product[]>([]);
   const [brands, setBrands] = useState<Brand[]>([]);
@@ -105,26 +106,13 @@ export default function ProductosPage() {
 
   const [form, setForm] = useState<ProductForm>(emptyForm);
 
-  useEffect(() => {
-    setDarkMode(window.localStorage.getItem("elite-gamma-theme") === "dark");
-    const handleThemeChange = (event: Event) => {
-      const customEvent = event as CustomEvent<{ darkMode: boolean }>;
-      setDarkMode(Boolean(customEvent.detail?.darkMode));
-    };
-    window.addEventListener("elite-gamma-theme-change", handleThemeChange);
-    return () => window.removeEventListener("elite-gamma-theme-change", handleThemeChange);
-  }, []);
-
-  const loadData = useCallback(async () => {
-    setLoading(true);
-    setError("");
+  const fetchData = useCallback(async () => {
     try {
       const supabase = createClient();
       const { data: business, error: businessError } = await supabase
         .from("businesses").select("id, name").limit(1).maybeSingle();
       if (businessError) throw new Error(businessError.message);
       if (!business) throw new Error("No encontramos un negocio asociado a tu cuenta.");
-      setBusinessId(business.id);
 
       const [productsResult, brandsResult, categoriesResult, stockResult] = await Promise.all([
         supabase.from("products").select(`
@@ -152,17 +140,58 @@ export default function ProductosPage() {
         minimum_stock: Number(p.minimum_stock),
         stock_quantity: stockMap.get(p.id) ?? 0,
       }));
-      setProducts(loaded);
-      setBrands(brandsResult.data ?? []);
-      setCategories(categoriesResult.data ?? []);
+      return {
+        businessId: business.id,
+        products: loaded,
+        brands: brandsResult.data ?? [],
+        categories: categoriesResult.data ?? [],
+      };
+    } catch (err) {
+      throw new Error(err instanceof Error ? err.message : "No se pudieron cargar los productos.");
+    }
+  }, [showArchived]);
+
+  const applyData = useCallback((data: Awaited<ReturnType<typeof fetchData>>) => {
+    setBusinessId(data.businessId);
+    setProducts(data.products);
+    setBrands(data.brands);
+    setCategories(data.categories);
+  }, []);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      applyData(await fetchData());
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudieron cargar los productos.");
     } finally {
       setLoading(false);
     }
-  }, [showArchived]);
+  }, [applyData, fetchData]);
 
-  useEffect(() => { void loadData(); }, [loadData]);
+  useEffect(() => {
+    let active = true;
+    void fetchData()
+      .then((data) => {
+        if (active) applyData(data);
+      })
+      .catch((err) => {
+        if (active) setError(err instanceof Error ? err.message : "No se pudieron cargar los productos.");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [applyData, fetchData]);
+
+  const refreshData = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    await loadData();
+  }, [loadData]);
 
   const filteredProducts = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -249,24 +278,24 @@ export default function ProductosPage() {
       const { error: rpcError } = await supabase.rpc("create_product_catalog_item", {
         p_business_id: businessId,
         p_name: form.name.trim(),
-        p_sku: form.sku.trim() || null,
-        p_model_name: form.model_name.trim() || null,
-        p_color: form.color.trim() || null,
-        p_description: form.description.trim() || null,
-        p_brand_id: form.brand_id || null,
-        p_category_id: form.category_id || null,
+        ...(form.sku.trim() ? { p_sku: form.sku.trim() } : {}),
+        ...(form.model_name.trim() ? { p_model_name: form.model_name.trim() } : {}),
+        ...(form.color.trim() ? { p_color: form.color.trim() } : {}),
+        ...(form.description.trim() ? { p_description: form.description.trim() } : {}),
+        ...(form.brand_id ? { p_brand_id: form.brand_id } : {}),
+        ...(form.category_id ? { p_category_id: form.category_id } : {}),
         p_manufacturer_sku: form.manufacturer_sku.trim() || null,
         p_cost_price: cost,
         p_sale_price: sale,
-        p_offer_price: form.offer_price === "" ? null : Number(form.offer_price),
-        p_min_sale_price: form.min_sale_price === "" ? null : Number(form.min_sale_price),
+        ...(form.offer_price === "" ? {} : { p_offer_price: Number(form.offer_price) }),
+        ...(form.min_sale_price === "" ? {} : { p_min_sale_price: Number(form.min_sale_price) }),
         p_minimum_stock: minimum,
         p_condition_status: form.condition_status,
       });
       if (rpcError) throw new Error(rpcError.message);
       setForm(emptyForm); setFormOpen(false);
       setSuccess("Producto creado. El inventario queda pendiente de conteo.");
-      await loadData();
+      await refreshData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo crear el producto.");
     } finally { setSaving(false); }
@@ -286,7 +315,7 @@ export default function ProductosPage() {
       else if (data === "archived") setSuccess(`“${pendingAction.name}” se archivó para conservar su historial.`);
       else setSuccess(`“${pendingAction.name}” ya estaba archivado.`);
       setPendingAction(null); setTypedConfirmation("");
-      await loadData();
+      await refreshData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo eliminar o archivar el producto.");
     } finally { setSaving(false); }
@@ -302,7 +331,7 @@ export default function ProductosPage() {
       });
       if (rpcError) throw new Error(rpcError.message);
       setSuccess(`“${product.name}” se restauró correctamente.`);
-      await loadData();
+      await refreshData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo restaurar el producto.");
     } finally { setSaving(false); }
@@ -348,7 +377,7 @@ export default function ProductosPage() {
                   {filtersOpen ? <path d="m6 15 6-6 6 6" /> : <path d="m6 9 6 6 6-6" />}
                 </svg>
               </button>
-              <button type="button" onClick={() => { setShowArchived((v) => !v); clearFilters(); setFiltersOpen(false); setError(""); setSuccess(""); }} className={`rounded-lg border px-4 py-2.5 text-xs font-semibold ${surface}`}>{showArchived ? "Ver activos" : "Ver archivados"}</button>
+              <button type="button" onClick={() => { setLoading(true); setShowArchived((v) => !v); clearFilters(); setFiltersOpen(false); setError(""); setSuccess(""); }} className={`rounded-lg border px-4 py-2.5 text-xs font-semibold ${surface}`}>{showArchived ? "Ver activos" : "Ver archivados"}</button>
               {!showArchived && <button type="button" onClick={() => { setFormOpen((v) => !v); setError(""); setSuccess(""); }} className="rounded-lg bg-[#E99A44] px-5 py-2.5 text-xs font-bold text-[#171D28] hover:bg-[#F3AB5C]">{formOpen ? "Cerrar formulario" : "+ Nuevo producto"}</button>}
             </div>
           </div>
@@ -432,7 +461,7 @@ export default function ProductosPage() {
 
           {/* TABLA */}
           <section className={`overflow-hidden rounded-xl border ${surface}`}>
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-inherit px-5 py-4"><div><h3 className={`text-sm font-bold ${title}`}>{showArchived ? "Productos archivados" : "Productos registrados"}</h3><p className={`mt-1 text-xs ${muted}`}>{filteredProducts.length} resultados de {products.length}</p></div><button onClick={() => void loadData()} type="button" className={`rounded-lg border px-3 py-2 text-xs font-medium ${surface}`}>↻ Actualizar</button></div>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-inherit px-5 py-4"><div><h3 className={`text-sm font-bold ${title}`}>{showArchived ? "Productos archivados" : "Productos registrados"}</h3><p className={`mt-1 text-xs ${muted}`}>{filteredProducts.length} resultados de {products.length}</p></div><button onClick={() => void refreshData()} type="button" className={`rounded-lg border px-3 py-2 text-xs font-medium ${surface}`}>↻ Actualizar</button></div>
             {loading ? <div className={`p-12 text-center text-sm ${muted}`}>Cargando productos...</div> : filteredProducts.length === 0 ? <div className="p-12 text-center"><p className={`text-sm font-semibold ${title}`}>No encontramos productos.</p><p className={`mt-2 text-xs ${muted}`}>Prueba otros filtros o registra un producto nuevo.</p></div> :
               <div className="overflow-x-auto"><table className="w-full min-w-[1250px] text-left"><thead><tr className={`border-b text-[10px] uppercase tracking-wider ${darkMode ? "border-[#354153] text-[#A0ABBC]" : "border-[#EAECF0] text-[#9297A3]"}`}>
                 <th className="px-5 py-4">Producto</th><th className="px-3 py-4">SKU</th><th className="px-3 py-4">Costo</th><th className="px-3 py-4">Publicado</th><th className="px-3 py-4">Objetivo</th><th className="px-3 py-4">Mínimo</th><th className="px-3 py-4">Stock</th><th className="px-3 py-4">Condición</th><th className="px-3 py-4">Validación</th><th className="px-5 py-4">Acciones</th>
